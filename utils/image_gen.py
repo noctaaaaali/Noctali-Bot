@@ -26,12 +26,14 @@ STYLES = {
         "top": (35, 25, 70),
         "bottom": (90, 40, 130),
         "accent": (170, 120, 255),
+        "glow": (255, 130, 190),
         "title": "BIENVENUE",
     },
     "leave": {
         "top": (40, 20, 25),
         "bottom": (100, 30, 40),
         "accent": (255, 110, 110),
+        "glow": (255, 90, 90),
         "title": "AU REVOIR",
     },
 }
@@ -53,7 +55,6 @@ def _make_circle_avatar(avatar_bytes: bytes, size: int, ring_color: tuple) -> Im
     draw.ellipse((0, 0, size, size), fill=255)
     avatar.putalpha(mask)
 
-    # Toile un peu plus grande pour dessiner l'anneau autour de l'avatar
     pad = 10
     canvas = Image.new("RGBA", (size + pad * 2, size + pad * 2), (0, 0, 0, 0))
     ring_draw = ImageDraw.Draw(canvas)
@@ -96,7 +97,7 @@ def _make_photo_bg(path: str, width: int, height: int) -> Image.Image:
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     for x in range(width):
-        ratio = 1 - (x / width)  # plus sombre à gauche, plus clair à droite
+        ratio = 1 - (x / width)
         alpha = int(70 + 130 * ratio)
         draw.line([(x, 0), (x, height)], fill=(8, 6, 15, alpha))
     return Image.alpha_composite(img, overlay).convert("RGB")
@@ -122,54 +123,50 @@ def _fit_text(draw, text, font_path, max_width, start_size, min_size=20, stroke_
     return ImageFont.truetype(font_path, min_size)
 
 
-def _gradient_text_layer(text, font, color_left, color_right, stroke_width=2, stroke_fill=(25, 15, 30)):
-    """Rend le texte dans un dégradé horizontal (couleur gauche -> droite), avec un léger contour sombre."""
+def _solid_text_layer(text, font, fill_color, stroke_width=0, stroke_fill=None):
+    """Rend le texte en une seule couleur (propre et simple), avec contour optionnel."""
     dummy = Image.new("RGBA", (10, 10))
     ddraw = ImageDraw.Draw(dummy)
     bbox = ddraw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
-    pad = 4
+    pad = 6
     w = (bbox[2] - bbox[0]) + pad * 2
     h = (bbox[3] - bbox[1]) + pad * 2
     ox, oy = -bbox[0] + pad, -bbox[1] + pad
 
-    mask = Image.new("L", (w, h), 0)
-    mdraw = ImageDraw.Draw(mask)
-    mdraw.text((ox, oy), text, font=font, fill=255, stroke_width=stroke_width, stroke_fill=255)
-
-    gradient = Image.new("RGB", (w, h), color_left)
-    gdraw = ImageDraw.Draw(gradient)
-    for x in range(w):
-        ratio = x / w
-        r = int(color_left[0] + (color_right[0] - color_left[0]) * ratio)
-        g = int(color_left[1] + (color_right[1] - color_left[1]) * ratio)
-        b = int(color_left[2] + (color_right[2] - color_left[2]) * ratio)
-        gdraw.line([(x, 0), (x, h)], fill=(r, g, b))
-
     layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    layer.paste(gradient, (0, 0), mask)
-
-    # fin contour sombre pour détacher le texte du fond, sans l'alourdir
+    ldraw = ImageDraw.Draw(layer)
     if stroke_fill:
-        outline_mask = Image.new("L", (w, h), 0)
-        odraw = ImageDraw.Draw(outline_mask)
-        odraw.text((ox, oy), text, font=font, fill=0, stroke_width=stroke_width, stroke_fill=255)
-        outline_layer = Image.new("RGBA", (w, h), stroke_fill + (255,))
-        outline_layer.putalpha(outline_mask)
-        base_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        base_layer.alpha_composite(outline_layer)
-        base_layer.alpha_composite(layer)
-        layer = base_layer
-
+        ldraw.text((ox, oy), text, font=font, fill=fill_color, stroke_width=stroke_width, stroke_fill=stroke_fill)
+    else:
+        ldraw.text((ox, oy), text, font=font, fill=fill_color)
     return layer, bbox
 
 
-def _paste_glow_text(base: Image.Image, layer: Image.Image, pos: tuple, glow_color: tuple, blur=10, glow_alpha=150):
-    """Colle le calque de texte avec une lueur douce derrière (désactivable si trop fort)."""
+def _paste_text_with_glow(
+    base: Image.Image,
+    layer: Image.Image,
+    pos: tuple,
+    glow_color: tuple,
+    glow_blur: int = 16,
+    glow_alpha: int = 170,
+    shadow_blur: int = 6,
+    shadow_alpha: int = 110,
+    shadow_offset: tuple = (3, 4),
+):
+    """Empile ombre portée douce -> glow -> texte net, comme un stack After Effects
+    (Drop Shadow + Deep Glow). Simple et clair, pas de dégradé multicolore."""
     alpha = layer.split()[-1]
+
+    shadow = Image.new("RGBA", layer.size, (0, 0, 0, shadow_alpha))
+    shadow.putalpha(alpha)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(shadow_blur))
+    shadow_canvas = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    shadow_canvas.paste(shadow, (pos[0] + shadow_offset[0], pos[1] + shadow_offset[1]), shadow)
+    base.alpha_composite(shadow_canvas)
+
     glow = Image.new("RGBA", layer.size, glow_color + (glow_alpha,))
     glow.putalpha(alpha)
-    glow = glow.filter(ImageFilter.GaussianBlur(blur))
-
+    glow = glow.filter(ImageFilter.GaussianBlur(glow_blur))
     glow_canvas = Image.new("RGBA", base.size, (0, 0, 0, 0))
     glow_canvas.paste(glow, pos, glow)
     base.alpha_composite(glow_canvas)
@@ -191,7 +188,6 @@ async def generate_card(member, kind: str = "welcome") -> io.BytesIO:
     base = base.convert("RGBA")
     draw = ImageDraw.Draw(base)
 
-    # Avatar circulaire à gauche
     avatar_bytes = await fetch_avatar_bytes(member)
     avatar_img = _make_circle_avatar(avatar_bytes, AVATAR_SIZE, style["accent"])
     avatar_x = 70
@@ -200,31 +196,24 @@ async def generate_card(member, kind: str = "welcome") -> io.BytesIO:
 
     text_x = avatar_x + avatar_img.width + 50
     max_text_width = WIDTH - text_x - 50
+    glow_color = style["glow"]
 
-    # Dégradé rose -> vert, doux (pas saturé) pour rester élégant
-    grad_left = (255, 140, 190)   # rose
-    grad_right = (140, 230, 170)  # vert d'eau
-    glow_color = (255, 170, 210) if kind == "welcome" else (255, 130, 130)
+    title_font = ImageFont.truetype(FONT_DISPLAY, 76)
+    title_layer, _ = _solid_text_layer(style["title"], title_font, (255, 255, 255))
+    _paste_text_with_glow(base, title_layer, (text_x, 85), glow_color, glow_blur=18, glow_alpha=180)
 
-    # Titre (BIENVENUE / AU REVOIR) — plus gros, dégradé + glow
-    title_font = ImageFont.truetype(FONT_DISPLAY, 66)
-    title_layer, _ = _gradient_text_layer(style["title"], title_font, grad_left, grad_right)
-    _paste_glow_text(base, title_layer, (text_x, 95), glow_color, blur=9, glow_alpha=130)
-
-    # Pseudo — encore plus gros, dégradé + glow, taille ajustée pour ne pas déborder
     name = member.display_name
-    name_font = _fit_text(draw, name, FONT_DISPLAY, max_text_width, 78, stroke_width=2)
-    name_layer, _ = _gradient_text_layer(name, name_font, grad_left, grad_right)
-    _paste_glow_text(base, name_layer, (text_x, 175), glow_color, blur=10, glow_alpha=140)
+    name_font = _fit_text(draw, name, FONT_DISPLAY, max_text_width, 92, min_size=30)
+    name_layer, _ = _solid_text_layer(name, name_font, (255, 255, 255))
+    _paste_text_with_glow(base, name_layer, (text_x, 175), glow_color, glow_blur=20, glow_alpha=190)
 
-    # Sous-texte (Membre #X) — un peu plus gros aussi, reste simple pour la lisibilité
-    sub_font = ImageFont.truetype(FONT_REGULAR, 30)
+    sub_font = ImageFont.truetype(FONT_REGULAR, 32)
     if kind == "welcome":
         sub_text = f"Membre #{member.guild.member_count}"
     else:
         sub_text = f"Il reste {member.guild.member_count} membres"
     draw.text(
-        (text_x, 285),
+        (text_x, 300),
         sub_text,
         font=sub_font,
         fill=(255, 255, 255),
@@ -236,4 +225,3 @@ async def generate_card(member, kind: str = "welcome") -> io.BytesIO:
     base.convert("RGB").save(buf, format="PNG")
     buf.seek(0)
     return buf
-
