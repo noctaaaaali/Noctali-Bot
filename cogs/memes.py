@@ -4,83 +4,47 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-# API dédiée qui va chercher les memes sur Reddit de son côté (évite le blocage
-# que Reddit applique aux requêtes automatisées venant de serveurs cloud comme Railway).
-MEME_API_BASE = "https://meme-api.com/gimme"
-HEADERS = {"User-Agent": "NoctaliBot/1.0 (Discord bot)"}
-
-# Sous-reddits ciblés, piochés une partie du temps pour varier les thèmes
-# (Simpsons, gaming, historique...) en plus du pool général de l'API.
-SUBREDDITS = [
-    "memes",
-    "dankmemes",
-    "wholesomememes",
-    "ProgrammerHumor",
-    "funny",
-    "me_irl",
-    "meirl",
-    "AdviceAnimals",
-    "terriblefacebookmemes",
-    "SimpsonsShitposting",
-    "HistoryMemes",
-    "gamingmemes",
-    "Animemes",
-    "MarvelMemes",
-    "comedyheaven",
-    "BlackPeopleTwitter",
-    "whitepeopletwitter",
-    "ComedyCemetery",
-    "shitposting",
-    "cursedcomments",
-    "surrealmemes",
-]
+# API publique et gratuite d'Imgflip : renvoie les ~100 templates de memes
+# les plus utilisés/connus (Drake, Distracted Boyfriend, Woman Yelling at Cat,
+# Change My Mind, etc.) — mêmes bases que dans le jeu "Make It Meme".
+IMGFLIP_MEMES_URL = "https://api.imgflip.com/get_memes"
 
 
 class Memes(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._cache = []  # mis en cache après le 1er appel, la liste bouge très peu
 
-    async def _fetch_meme(self):
-        # 1 fois sur 3 : sous-reddit ciblé (pour varier les thèmes précis)
-        # sinon : pool général de l'API (déjà large et "tendance")
-        if random.random() < 0.35:
-            url = f"{MEME_API_BASE}/{random.choice(SUBREDDITS)}"
-        else:
-            url = MEME_API_BASE
+    async def _get_templates(self):
+        if self._cache:
+            return self._cache
 
         try:
-            async with aiohttp.ClientSession(headers=HEADERS) as session:
-                async with session.get(url, timeout=10) as resp:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(IMGFLIP_MEMES_URL, timeout=10) as resp:
                     if resp.status != 200:
-                        return None
+                        return []
                     data = await resp.json()
         except Exception:
-            return None
+            return []
 
-        if not data or data.get("nsfw") or data.get("code"):
-            return None
+        if data.get("success"):
+            self._cache = data["data"]["memes"]
 
-        return data
+        return self._cache
 
-    @app_commands.command(name="meme", description="Envoie un meme random")
+    @app_commands.command(name="meme", description="Envoie un meme culte et connu")
     async def meme(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        post = None
-        for _ in range(4):
-            post = await self._fetch_meme()
-            if post:
-                break
-
-        if not post:
-            await interaction.followup.send(
-                "❌ Pas réussi à trouver un meme, réessaie dans quelques secondes."
-            )
+        templates = await self._get_templates()
+        if not templates:
+            await interaction.followup.send("❌ Pas réussi à récupérer un meme, réessaie.")
             return
 
-        embed = discord.Embed(title=post.get("title", "Meme"), color=discord.Color.orange())
-        embed.set_image(url=post["url"])
-        embed.set_footer(text=f"r/{post.get('subreddit', '?')} • 👍 {post.get('ups', 0)}")
+        template = random.choice(templates)
+        embed = discord.Embed(title=template["name"], color=discord.Color.orange())
+        embed.set_image(url=template["url"])
         await interaction.followup.send(embed=embed)
 
 
