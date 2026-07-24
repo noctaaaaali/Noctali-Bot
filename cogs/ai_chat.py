@@ -6,25 +6,21 @@ from discord.ext import commands
 from discord import app_commands
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 HISTORY_PATH = os.path.join(DATA_DIR, "ai_history.json")
 
-# Nombre d'ÉCHANGES (question + réponse) gardés en mémoire, PAR MEMBRE.
-# Comme tout reste dans l'historique de la personne, si elle demande un jour
-# "parle-moi plus jeune", l'IA continue naturellement sur ce ton avec ELLE
-# à chaque fois (l'instruction reste dans son historique) — sans affecter
-# les autres membres, qui ont leur propre historique séparé.
+# Un SEUL historique, partagé par tout le monde sur le serveur (pas par membre).
 MAX_EXCHANGES = 50
 
 SYSTEM_PROMPT = (
     "Tu es Noctali Bot, l'assistant IA sympa et décontracté d'un serveur Discord communautaire. "
+    "Plusieurs membres différents te parlent dans la même conversation : les messages "
+    "'user' peuvent venir de personnes différentes. "
     "Réponds en français, de façon concise et naturelle, comme dans une vraie conversation Discord "
     "(pas de réponses trop longues ou trop formelles). "
-    "Si l'utilisateur t'a déjà demandé d'adopter un ton ou un style particulier plus tôt dans la "
-    "conversation, continue de t'y tenir avec lui. "
     "Tu ne peux pas envoyer d'images ou de vrais memes toi-même : si on te demande un meme, "
     "dis simplement d'utiliser la commande /meme à la place, sans en inventer un en texte."
 )
@@ -46,17 +42,18 @@ def _save_json(path: str, data: dict):
 class AIChat(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.history = _load_json(HISTORY_PATH)  # {user_id: [{"role":.., "content":..}, ...]}
+        loaded = _load_json(HISTORY_PATH)
+        self.history: list = loaded.get("messages", [])  # un seul historique, partagé
 
-    async def _ask_groq(self, user_id: str, question: str) -> str:
+    async def _ask_groq(self, author_name: str, question: str) -> str:
         if not GROQ_API_KEY:
             return "⚠️ Aucune clé `GROQ_API_KEY` configurée sur Railway."
 
-        history = self.history.setdefault(user_id, [])
-        history.append({"role": "user", "content": question})
-        del history[: -MAX_EXCHANGES * 2]  # *2 : question + réponse par échange
+        # On préfixe avec le pseudo pour que l'IA sache qui parle dans la conv commune
+        self.history.append({"role": "user", "content": f"{author_name} : {question}"})
+        del self.history[: -MAX_EXCHANGES * 2]
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.history
 
         headers = {
             "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -75,9 +72,9 @@ class AIChat(commands.Cog):
             return f"❌ Erreur de connexion à l'IA : {e}"
 
         reply = data["choices"][0]["message"]["content"].strip()
-        history.append({"role": "assistant", "content": reply})
-        del history[: -MAX_EXCHANGES * 2]
-        _save_json(HISTORY_PATH, self.history)
+        self.history.append({"role": "assistant", "content": reply})
+        del self.history[: -MAX_EXCHANGES * 2]
+        _save_json(HISTORY_PATH, {"messages": self.history})
         return reply
 
     @commands.Cog.listener()
@@ -93,7 +90,7 @@ class AIChat(commands.Cog):
         question = question.strip() or "Salut !"
 
         async with message.channel.typing():
-            reply = await self._ask_groq(str(message.author.id), question)
+            reply = await self._ask_groq(message.author.display_name, question)
 
         for i in range(0, len(reply), 2000):
             await message.reply(reply[i : i + 2000], mention_author=False)
@@ -102,7 +99,7 @@ class AIChat(commands.Cog):
     @app_commands.describe(question="Ta question")
     async def ask(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer()
-        reply = await self._ask_groq(str(interaction.user.id), question)
+        reply = await self._ask_groq(interaction.user.display_name, question)
 
         first_chunk, rest = reply[:2000], reply[2000:]
         await interaction.followup.send(first_chunk)
@@ -110,12 +107,12 @@ class AIChat(commands.Cog):
             await interaction.channel.send(rest[i : i + 2000])
 
     @app_commands.command(
-        name="forget_me", description="Efface ton historique de conversation avec l'IA"
+        name="reset_ia", description="Efface l'historique de conversation de l'IA (pour tout le monde)"
     )
-    async def forget_me(self, interaction: discord.Interaction):
-        self.history.pop(str(interaction.user.id), None)
-        _save_json(HISTORY_PATH, self.history)
-        await interaction.response.send_message("🧹 Ton historique a été effacé.", ephemeral=True)
+    async def reset_ia(self, interaction: discord.Interaction):
+        self.history.clear()
+        _save_json(HISTORY_PATH, {"messages": self.history})
+        await interaction.response.send_message("🧹 Historique de l'IA effacé pour tout le monde.")
 
 
 async def setup(bot: commands.Bot):
